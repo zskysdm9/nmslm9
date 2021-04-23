@@ -51,10 +51,11 @@ fn test_obslog_with_or_without_diff() {
     @  test.user@example.com 2001-02-03 04:05:08.000 +07:00 1daafc17fefb
     | my description
     | Resolved conflict in file1:
-    |    1    1: <<<<<<<resolved
+    |    1     : <<<<<<<
     |    2     : %%%%%%%
     |    3     : +bar
     |    4     : >>>>>>>
+    |         1: resolved
     o  test.user@example.com 2001-02-03 04:05:08.000 +07:00 813918f7b4e6 conflict
     | my description
     o  test.user@example.com 2001-02-03 04:05:08.000 +07:00 8f02f5470c55
