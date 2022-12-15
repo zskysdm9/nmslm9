@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::default::Default;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 use git2::Oid;
 use itertools::Itertools;
@@ -319,6 +320,66 @@ pub fn export_refs(
         }
     }
     Ok(failed_branches)
+}
+
+#[derive(Error, Debug)]
+pub enum GitHookError {
+    #[error("Could not construct stdin string: {0}")]
+    ConstructStdin(std::fmt::Error),
+}
+
+pub fn invoke_post_rewrite_hook(
+    git_repo: &git2::Repository,
+    abandoned_commits: &HashSet<CommitId>,
+    rewritten_commits: &HashMap<CommitId, HashSet<CommitId>>,
+) -> Result<(), GitHookError> {
+    let hooks_dir = {
+        let config = git_repo.config().unwrap();
+        let hooks_dir = match config.get_path("core.hooksPath") {
+            Ok(value) => value,
+            Err(err) if err.code() == git2::ErrorCode::NotFound => PathBuf::from("hooks"),
+            Err(err) => panic!("@nocommit raise err {err}"),
+        };
+        if hooks_dir.is_relative() {
+            git_repo.path().join(hooks_dir)
+        } else {
+            hooks_dir
+        }
+    };
+
+    let post_rewrite_hook_path = hooks_dir.join("post-rewrite");
+    if !post_rewrite_hook_path.is_file() {
+        return Ok(());
+    }
+
+    let payload = {
+        use std::fmt::Write;
+        let mut payload = String::new();
+        for commit_id in abandoned_commits {
+            writeln!(payload, "{} {}", commit_id.hex(), Oid::zero())
+                .map_err(GitHookError::ConstructStdin)?;
+        }
+        for (old_commit_id, new_commit_ids) in rewritten_commits {
+            for new_commit_id in new_commit_ids {
+                writeln!(payload, "{} {}", old_commit_id.hex(), new_commit_id.hex())
+                    .map_err(GitHookError::ConstructStdin)?;
+            }
+        }
+        payload
+    };
+
+    // TODO: need to set working directory?
+    let mut process = Command::new(post_rewrite_hook_path)
+        .arg("rebase") // rewrite type
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = process.stdin.take().unwrap();
+    {
+        use std::io::Write;
+        write!(stdin, "{}", payload).unwrap();
+    }
+    Ok(())
 }
 
 #[derive(Error, Debug, PartialEq)]

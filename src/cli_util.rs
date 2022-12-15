@@ -29,7 +29,7 @@ use git2::{Oid, Repository};
 use itertools::Itertools;
 use jujutsu_lib::backend::{BackendError, CommitId, TreeId};
 use jujutsu_lib::commit::Commit;
-use jujutsu_lib::git::{GitExportError, GitImportError};
+use jujutsu_lib::git::{GitExportError, GitHookError, GitImportError};
 use jujutsu_lib::gitignore::GitIgnoreFile;
 use jujutsu_lib::matchers::{EverythingMatcher, Matcher, PrefixMatcher, Visit};
 use jujutsu_lib::op_heads_store::{OpHeadResolutionError, OpHeads, OpHeadsStore};
@@ -184,6 +184,12 @@ impl From<GitExportError> for CommandError {
         CommandError::InternalError(format!(
             "Failed to export refs to underlying Git repo: {err}"
         ))
+    }
+}
+
+impl From<GitHookError> for CommandError {
+    fn from(err: GitHookError) -> Self {
+        CommandError::InternalError(format!("Failed to invoke Git hook: {err}"))
     }
 }
 
@@ -879,6 +885,8 @@ impl WorkspaceCommandHelper {
             writeln!(ui, "Nothing changed.")?;
             return Ok(());
         }
+        let abandoned_commits = mut_repo.abandoned_commits.clone();
+        let rewritten_commits = mut_repo.rewritten_commits.clone();
         let num_rebased = mut_repo.rebase_descendants(ui.settings())?;
         if num_rebased > 0 {
             writeln!(ui, "Rebased {num_rebased} descendant commits")?;
@@ -888,6 +896,8 @@ impl WorkspaceCommandHelper {
             let git_repo = self.repo.store().git_repo().unwrap();
             let failed_branches = git::export_refs(mut_repo, &git_repo)?;
             print_failed_git_export(ui, &failed_branches)?;
+
+            git::invoke_post_rewrite_hook(&git_repo, &abandoned_commits, &rewritten_commits)?;
         }
         let maybe_old_commit = tx
             .base_repo()

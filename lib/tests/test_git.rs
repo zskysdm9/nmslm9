@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1311,4 +1312,17 @@ fn test_push_updates_invalid_remote() {
         git::RemoteCallbacks::default(),
     );
     assert!(matches!(result, Err(GitPushError::NoSuchRemote(_))));
+}
+
+#[test]
+fn test_post_rewrite_hook() {
+    let test_data = GitRepoData::create();
+    let git_repo = test_data.git_repo;
+    let commit1 = empty_git_commit(&git_repo, "refs/heads/main", &[]);
+    git_repo.set_head("refs/heads/main").unwrap();
+
+    let abandoned_commits = HashSet::new();
+    let rewritten_commits = HashMap::new();
+    // TODO: how to test?
+    git::invoke_post_rewrite_hook(&git_repo, &abandoned_commits, &rewritten_commits).unwrap();
 }
