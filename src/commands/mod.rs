@@ -97,10 +97,12 @@ enum Commands {
     Merge(NewArgs),
     Move(MoveArgs),
     New(NewArgs),
+    Next(NextArgs),
     Obslog(ObslogArgs),
     #[command(subcommand)]
     #[command(visible_alias = "op")]
     Operation(operation::OperationCommands),
+    Prev(PrevArgs),
     Rebase(RebaseArgs),
     Resolve(ResolveArgs),
     Restore(RestoreArgs),
@@ -505,6 +507,68 @@ struct NewArgs {
     /// Insert the new change between the target commit(s) and their parents
     #[arg(long, short = 'B', visible_alias = "before")]
     insert_before: bool,
+}
+
+/// Move the current working copy commit to the next child revision in the
+/// repository. The command moves you to the next child in a linear fashion.
+///
+/// F        F  @
+/// |        | /
+/// C  @ =>  C
+/// | /      |
+/// B        B
+///
+/// If `edit` is passed as an argument, it will move you directly to the child
+/// revision.
+///
+/// F        F
+/// |        |
+/// C        C
+/// |        |
+/// B  @  => @
+/// | /      |
+/// A        A
+// TODO(#NNN): Handle multiple child revisions properly.
+#[derive(clap::Args, Clone, Debug)]
+struct NextArgs {
+    /// How many revisions to move forward. By default advances to the next
+    /// child.
+    #[arg(default_value = "1")]
+    amount: usize,
+    /// Instead of moving the empty commit from `jj new`, edit the child
+    /// revision directly. This mirrors the behavior of Mercurial and
+    /// Sapling.
+    edit: bool,
+}
+
+/// Move the working copy commit to the parent of the current revision.
+/// The command moves you to the parent in a linear fashion.
+///
+/// F @     F
+/// |/      |  
+/// A   =>  A  @
+/// |       | /
+/// B       B
+///
+/// If `edit` is passed as an argument, it will move the working copy commit
+/// directly to the parent.
+///
+/// F @     F
+/// |/      |
+/// C   =>  C
+/// |       |
+/// B       @
+/// |       |
+/// A       A
+// TODO(#NNN): Handle multiple parents, e.g merges.
+#[derive(clap::Args, Clone, Debug)]
+struct PrevArgs {
+    /// How many revisions to move backward. By default moves to the parent.
+    #[arg(default_value = "1")]
+    amount: usize,
+    /// Edit the parent directly, instead of moving the empty revision.
+    /// This mirrors the behavior of Mercurial and Sapling.
+    edit: bool,
 }
 
 /// Move changes from one revision into another
@@ -2170,6 +2234,107 @@ fn combine_messages(
     Ok(description)
 }
 
+fn cmd_next(ui: &mut Ui, command: &CommandHelper, args: &NextArgs) -> Result<(), CommandError> {
+    let mut workspace_command = command.workspace_helper(ui)?;
+    let children = resolve_destination_revs(&workspace_command, &["@+"], false)
+        .into_iter()
+        .collect_vec();
+
+    let edit = args.edit;
+    assert!(args.amount == 1 || args.amount > 1);
+    let amount = args.amount;
+    // Handle the simple `jj next` call.
+    if amount == 1 {
+        // We need to discover the parent of the working copy commit, to traverse to all
+        // possible children.
+        let parent = if let Some(current_wc_commit) = workspace_command.current_wc_id() {
+            // This is always safe, as the working copy commit always has one parent.
+            current_wc_commit.parents().pop()
+        } else {
+            return Err(user_error("This command requires a working copy"));
+        };
+
+        let children = RevsetExpression::descendants(&[parent.id()]);
+
+        // If we're the last commmit in the tree, we cannot descend further down the
+        // tree. Since we're not `editing` the commit, it's still possible to
+        // move the wc-commit to the end.
+        if children.is_empty() {}
+    }
+    assert!(amount > 1, "Expected to descend to further children");
+
+    if edit {}
+    // TODO(#NNN) We currently cannot deal with multiple children, which result
+    // from branches. Fix it when --interactive is implemented.
+    Ok(())
+}
+
+fn cmd_prev(ui: &mut Ui, command: &CommandHelper, args: &PrevArgs) -> Result<(), CommandError> {
+    let mut workspace_command = command.workspace_helper(ui)?;
+    let parents = resolve_destination_revs(&workspace_command, &["@-"], false)
+        .into_iter()
+        .collect_vec();
+    assert!(parents.len() >= 1, "expected a set of revisions for next");
+    let edit = args.edit;
+    assert!(args.amount == 1 || args.amount > 1);
+    let current_wc = workspace_command.get_wc_commit_id().unwrap();
+    let current_id = current_wc.id().hex();
+    // Handle the simple case of a basic `prev` call.
+    if args.amount == 1 {
+        let parent = parents[0];
+        // TODO(#NNN): Handle multiple parents correctly, e.g prompt if we're
+        // interactive.
+        if parent.parents().len() > 1 {
+            return Err(user_error(
+                "Revision has multiple parents, see issue #NNN for more info",
+            ));
+        }
+        workspace_command.check_rewritable(&parent)?;
+        let parent_id = parent.id().hex();
+        // Omit the "moved N commits" from the message.
+        let mut tx = workspace_command.start_transaction(format!("prev: {current_id} -> {parent_id}"));
+        let root_commit = tx.base_repo().store().root_commit();
+        // If we're editing, just move to the revision directly.
+        if edit {
+            if parent_id == root_commit.id() {
+                return Err(user_error("Editing the root commit is not allowed."));
+            }
+            tx.edit(&parent).unwrap();
+            tx.finish(ui)?;
+            return Ok(());
+        }
+        let merged_tree = merge_commit_trees(tx.base_repo(), &parents);
+        // Make the workspace commit a descendant of the parent.
+        let new_wc_revision = tx
+            .mut_repo()
+            .new_commit(
+                command.settings(),
+                parent_id.clone(),
+                merged_tree.id().clone(),
+            )
+            .write()?;
+        tx.edit(&new_wc_revision).unwrap();
+        tx.finish(ui)?;
+        return Ok(());
+    }
+    assert!(args.amount > 1, "Expected more parents to traverse");
+    let amount = args.amount;
+    // Collect all ancestors up until the root commit.
+    let all_parents = RevsetExpression::ancestors(&current_wc);
+    let mut tx =
+        workspace_helper.start_transaction("prev: moved {amount} commits {current} -> {target}");
+    let root_commit = tx.base_repo().store().root_commit();
+    // TODO(#NNN): We currently cannot deal with multiple parents correctly, e.g for
+    // --interactive.
+    if parent.parents().len() > 1 {
+        return Err(user_error(
+            "Revision has multiple parents,see issue #NNN for more info",
+        ));
+    }
+    if edit {}
+    Ok(())
+}
+
 fn cmd_move(ui: &mut Ui, command: &CommandHelper, args: &MoveArgs) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui)?;
     let source = workspace_command.resolve_single_rev(args.from.as_deref().unwrap_or("@"))?;
@@ -3448,6 +3613,8 @@ pub fn run_command(
         Commands::Duplicate(sub_args) => cmd_duplicate(ui, command_helper, sub_args),
         Commands::Abandon(sub_args) => cmd_abandon(ui, command_helper, sub_args),
         Commands::Edit(sub_args) => cmd_edit(ui, command_helper, sub_args),
+        Commands::Next(sub_args) => cmd_next(ui, command_helper, sub_args),
+        Commands::Prev(sub_args) => cmd_prev(ui, command_helper, sub_args),
         Commands::New(sub_args) => cmd_new(ui, command_helper, sub_args),
         Commands::Move(sub_args) => cmd_move(ui, command_helper, sub_args),
         Commands::Squash(sub_args) => cmd_squash(ui, command_helper, sub_args),

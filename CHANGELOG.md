@@ -59,6 +59,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to the configured user. `jj describe` also gained a `--no-edit` option to
   avoid opening the editor.
 
+* `jj next` and `jj prev` are added, these allow you to traverse the history
+  in a linear style, see [#NNN](https://github.com/martinvonz/jj/issues/NNN)
+  for further pending improvements.
+
 ### Fixed bugs
 
 * Modify/delete conflicts now include context lines
